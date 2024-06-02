@@ -6,10 +6,18 @@ import shutil
 import datetime
 import xlsxwriter 
 
+import torch             #torch.nn , contains all of the Pytorch building block for Neural Network
+import torchvision
+import torchsummary
+import torchinfo
+import sys
+
+
 import numpy as np
 import mediapipe as mp
 
-from util.Config import config
+from utils.Config import config
+from utils.Groundtruth_Json_Maker import Dir2JSON
 
 def euclidean_distance(point1, point2):
     """
@@ -412,7 +420,7 @@ def write_xlsx(i):
     
     print(i)
     name = os.path.basename(i)
-    name=name.rsplit("_", maxsplit=1)[0]
+    name=name.rsplit(".", maxsplit=1)[0]
 
     workbook = xlsxwriter.Workbook(os.path.join("output",name+'_excel.xlsx'))
     worksheet = workbook.add_worksheet()
@@ -556,15 +564,157 @@ def write_xlsx(i):
 
     workbook.close()
 
+def dataset_getitem(input_path):
+    
+    with open(input_path, 'r', encoding="utf-8") as f:   
+        
+        dataset=json.load(f)
+
+        # datasets_contain =   [],
+        # categories       =   {},
+        # datas_name       =   [],
+        # datas            =   {},
+        # ground_truth     =   {},
+
+        # "categories": {
+        #     "Abnormal_CS": "E:\\Deep_Learning\\AlexNet_pytorch\\model_data\\baby_datasets\\Abnormal_CS",
+        #     "Abnormal_PR": "E:\\Deep_Learning\\AlexNet_pytorch\\model_data\\baby_datasets\\Abnormal_PR",
+        #     "Normal": "E:\\Deep_Learning\\AlexNet_pytorch\\model_data\\baby_datasets\\Normal"
+        # },
+
+        sequence  = torch.tensor(dataset["datas"][str(input_path)], dtype=torch.float32)   # transform img to tensor
+        
+        # "output\\WM_N02王臣睿A133595391＿20180710＿44w1d_add_add_vel_acc_input.json"
+
+        # print(sequence.shape) # (113, 2997)
+        # (batch_size, seq_length, input_size)
+        sequence  = sequence.permute(1,0)                                       # (input_size, seq_length) -> (seq_length, input_size) 
+
+    return sequence
+
+def model():
+
+    CURRENT_MODEL_NAME= ['VGG16','LSTM'][-1]
+    
+    if CURRENT_MODEL_NAME=='LSTM':
+
+        from model_architecture.LSTM import LSTM
+
+        config.seq_length,config.input_size = 1500, 36
+
+        os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
+
+    #--------------------------------------------------------------------------------------------------------------#
+    # 解決衝突問題
+    # 預設不允許同時重續訪問同一個庫
+    # https://stackoverflow.com/questions/65734044/kernel-appears-to-have-died-jupyter-notebook-python-matplotlib 
+    #--------------------------------------------------------------------------------------------------------------#
+
+    os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
+
+    #----------------------------------------------------------------#
+    # 確認所使用版本
+    #----------------------------------------------------------------#
+    # check python version and info
+    # https://phoenixnap.com/kb/check-tensorflow-version code reference
+    #----------------------------------------------------------------#
+
+    version={
+        "torch"         :torch.__version__,
+        "torchvision"   :torchvision.__version__,
+        "Python"        :sys.version,
+        "Version info"  :str(sys.version_info),
+    }
+
+    for i,(k,v) in enumerate(version.items()):
+        print(f"#{i:<3} {k:15} version is {v:10} ")
+
+    #----------------------------------------------------------------#
+    # 確認cuda是否正常開啟
+    #----------------------------------------------------------------#
+    # 若正常開啟則選擇GPU用於訓練
+    #----------------------------------------------------------------#
+
+    print('cuda is_available :', torch.cuda.is_available())
+    print('cuda device count :', torch.cuda.device_count())
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Using: {device}")
+
+
+    #----------------------------------------------------------------#
+    # -> ['Abnormal_CS', 'Abnormal_PR', 'Normal']
+    #----------------------------------------------------------------#
+
+    label_name_list = ['Abnormal_CS', 'Abnormal_PR', 'Normal']
+
+    #----------------------------------------------------------------#
+    # 轉換為帶有編號的字典
+    #----------------------------------------------------------------#
+    # -> {'daisy': 0, 'dandelion': 1, 'roses': 2, 'sunflowers': 3, 'tulips': 4}
+    #----------------------------------------------------------------#
+    # -> {'Abnormal_CS': 0, 'Abnormal_PR': 1, 'Normal': 2} 
+    #----------------------------------------------------------------#
+
+    label_map = {'Abnormal_CS': 0, 'Abnormal_PR': 1, 'Normal': 2} 
+
+
+    model = LSTM(label_name_list,input_size=config.input_size).to(device)
+
+
+
+    model_save_folder=f'./model_output/{CURRENT_MODEL_NAME}/'
+    model_weight_folder=os.path.join(model_save_folder ,os.listdir(f'./model_output/{CURRENT_MODEL_NAME}')[-1])
+    lastest_weight = os.path.join(model_weight_folder+"/model_weights",os.listdir(model_weight_folder+"/model_weights")[-1])
+
+    load_pretrain_weights=config.specific_weights_path
+
+    state_dict=torch.load([lastest_weight,load_pretrain_weights][config.specific_weights])
+    
+    model.load_state_dict(state_dict) 
+    #model.load_state_dict(state_dict,strict=False) 
+
+    #--------------------------------------------#
+    #  將模型設至evaluation mode
+    #--------------------------------------------#
+    # Input type (torch.FloatTensor) and weight type (torch.cuda.FloatTensor) should be the same
+    # 先前因為在'evaluation'重新載入模型所以沒有此問題
+    # 但會導致模型實際上是在CPU進行evaluation
+    # 若要在GPU上進行則需要將datasetloader輸出的image 在送入模型前使用todevice)
+    #--------------------------------------------#
+    
+    model.eval()
+
+
+    # 缺少batch_size時如何補上維度　　例如只有torch.Size([416, 36])
+    # 使用 unsqueeze(0) 方法在输入数据的第一个维度添加一个批次维度。例如，如果输入数据形状是 [416, 36]，添加批次维度后，形状变为 [1, 416, 36]。
+    # print(input_sequence)
+    # print(input_sequence.shape)
+
+
+    with torch.no_grad():
+        pred = model(input_sequence.unsqueeze(0) ) # get predict probability
+
+    print('raw_prediction logtis', pred, pred.shape, sep="\n")
+
+    predicted_prob_max=pred.argmax(dim=1)
+    print('Prediction: ', label_name_list[predicted_prob_max])
+    return label_name_list[predicted_prob_max]
 
 if __name__ == '__main__' :
 
-    input_data_path  = r"dataset\Normal\WM_N02王臣睿A133595391＿20180710＿44w1d.mp4"
+    input_data_path  = r"dataset\WM_N02王臣睿A133595391＿20180710＿44w1d.mp4"
     origin_file_path = base_parameter (input_data_path) 
     vel_file_path    = calculate_velocity (origin_file_path) 
-    acc_file_path    = calculate_acc (vel_file_path) 
+    acc_file_path    = calculate_acc (vel_file_path)  # preprocessing_dataset\output_WM_N02王臣睿A133595391＿20180710＿44w1d_2024_06_02_15_53_36\WM_N02王臣睿A133595391＿20180710＿44w1d_add_add_vel_acc.json
 
     shutil.copy(acc_file_path,config.output_path)
     write_xlsx(acc_file_path)
 
     print(f"finish processing {input_data_path}")
+
+    Dir2JSON_file_path = Dir2JSON("preprocessing_dataset\output_WM_N02王臣睿A133595391＿20180710＿44w1d_2024_06_02_15_53_36\WM_N02王臣睿A133595391＿20180710＿44w1d_add_add_vel_acc.json").output_path_name()
+    # print(Dir2JSON_file_path) # output\WM_N02王臣睿A133595391＿20180710＿44w1d_add_add_vel_acc_input.json
+    
+    input_sequence = dataset_getitem(Dir2JSON_file_path)
+    output = model()
